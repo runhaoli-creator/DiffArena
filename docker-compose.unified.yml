@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Unified Docker Compose configuration for Cosmos-Transfer2.5 + Diffusion Policy
+# Makes it easier to manage the container with both projects integrated
+
+version: '3.8'
+
+services:
+  cosmos-transfer-diffusion-policy:
+    build:
+      context: .
+      dockerfile: Dockerfile.unified
+      args:
+        - TARGETPLATFORM=linux/amd64
+    image: cosmos-transfer-diffusion-policy:latest
+    container_name: cosmos-transfer-diffusion-policy
+    volumes:
+      # Mount current directory to /workspace
+      - .:/workspace
+      # Named volume for .venv to persist across container restarts
+      - cosmos-transfer-diffusion-policy-venv:/workspace/.venv
+      # Mount diffusion_policy if it's a separate directory
+      # - ../diffusion_policy:/workspace/diffusion_policy:ro
+    working_dir: /workspace
+    # GPU support (requires nvidia-docker2)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Environment variables
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - PYTHONUNBUFFERED=1
+      # Enable learnable noise for adversarial attack
+      - LEARN_NOISE=1
+      # Set PYTHONPATH to include both projects
+      - PYTHONPATH=/workspace:/workspace/diffusion_policy
+    # Keep container running
+    stdin_open: true
+    tty: true
+    # Command to run (default: bash)
+    command: /bin/bash
+
+volumes:
+  cosmos-transfer-diffusion-policy-venv:
+    driver: local
+

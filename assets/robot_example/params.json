@@ -1,0 +1,27 @@
+{
+  "video_path": "assets/robot_example/robot_input.mp4",
+
+  "prompt_path": "assets/robot_example/robot_prompt.json",
+  "negative_prompt": "blurry, distorted, unrealistic",
+
+  "output_dir": "outputs/robot_example_edge",
+
+  "seed": 42,
+  "resolution": "720",
+  "guidance": 3,
+  "control_weight": 1.0,
+  "show_control_condition": false,
+  "show_input": false,
+  "not_keep_input_resolution": false,
+
+  "disable_guardrails": false,
+  "offload_guardrail_models": true,
+
+  "edge": {
+    "path": "assets/robot_example/edge"
+  },
+
+  "learn_noise": true,
+  "noise_steps": 1,
+  "noise_lr": 0.005
+}

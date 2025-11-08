@@ -1,0 +1,23 @@
+{
+  "name": "robot_edge_learnable",
+  "video_path": "robot_input.mp4",
+  "prompt_path": "robot_prompt.txt",
+  "negative_prompt": "blurry, distorted, unrealistic",
+  
+  "seed": 42,
+  "resolution": "720",
+  "guidance": 3,
+  "show_control_condition": false,
+  "show_input": false,
+  "not_keep_input_resolution": false,
+
+  "edge": {
+    "control_path": "edge/robot_edge.mp4",
+    "control_weight": 1.0
+  },
+
+  "learn_noise": true,
+  "noise_steps": 1,
+  "noise_lr": 0.005
+}
+

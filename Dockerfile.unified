@@ -1,0 +1,109 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Unified Dockerfile for Cosmos Transfer2.5 + Diffusion Policy
+# This Dockerfile integrates both projects into a single environment
+
+ARG TARGETPLATFORM
+ARG BASE_IMAGE=nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
+
+FROM ${BASE_IMAGE}
+
+# Set the DEBIAN_FRONTEND environment variable to avoid interactive prompts during apt operations.
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install packages (including additional ones for Diffusion Policy)
+RUN --mount=type=cache,target=/var/cache/apt \
+    --mount=type=cache,target=/var/lib/apt \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        curl \
+        ffmpeg \
+        git \
+        libgl1 \
+        libglib2.0-0 \
+        tree \
+        wget \
+        # Additional packages for Diffusion Policy
+        libosmesa6-dev \
+        libgl1-mesa-glx \
+        libglfw3 \
+        patchelf \
+        # For mujoco (if needed)
+        libglew-dev \
+        libglfw3-dev || \
+    # Fallback for Ubuntu 24.04 (some packages have different names)
+    apt-get install -y --no-install-recommends \
+        curl \
+        ffmpeg \
+        git \
+        libgl1 \
+        libglib2.0-0 \
+        tree \
+        wget \
+        libosmesa6-dev \
+        libglx-mesa0 \
+        libglfw3 \
+        patchelf \
+        libglew-dev \
+        libglfw3-dev
+
+# Install uv: https://docs.astral.sh/uv/getting-started/installation/
+COPY --from=ghcr.io/astral-sh/uv:0.8.12 /uv /uvx /usr/local/bin/
+# Disable bytecode compilation to reduce file descriptor usage during installs
+ENV UV_COMPILE_BYTECODE=0
+# Copy from the cache instead of linking since it's a mounted volume
+ENV UV_LINK_MODE=copy
+# Limit parallelism to avoid running out of file descriptors in large installs
+ENV UV_COMPILE_PARALLELISM=1
+# Ensure installed tools can be executed out of the box
+ENV UV_TOOL_BIN_DIR=/usr/local/bin
+
+# Install just: https://just.systems/man/en/pre-built-binaries.html
+RUN curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin --tag 1.42.4
+
+WORKDIR /workspace
+
+# Copy project files
+COPY pyproject.toml uv.lock .python-version ./
+COPY packages ./packages
+
+# Install the project's dependencies using the lockfile and settings
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    --mount=type=bind,source=.python-version,target=.python-version \
+    --mount=type=bind,source=packages,target=packages \
+    uv sync --locked --no-install-project
+
+# Install Diffusion Policy dependencies (if requirements file exists)
+# Copy requirements file first (if it exists)
+COPY requirements-diffusion-policy.txt* ./
+
+# Install Diffusion Policy dependencies using pip (through uv)
+# Use the virtual environment created by uv sync
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=requirements-diffusion-policy.txt,target=requirements-diffusion-policy.txt \
+    if [ -f requirements-diffusion-policy.txt ]; then \
+        /workspace/.venv/bin/pip install -r requirements-diffusion-policy.txt || true; \
+    fi
+
+# Install Diffusion Policy package in development mode (if directory exists)
+# This allows us to import it as a module
+RUN --mount=type=bind,source=diffusion_policy,target=diffusion_policy \
+    if [ -d diffusion_policy ]; then \
+        /workspace/.venv/bin/pip install -e ./diffusion_policy || true; \
+    fi
+
+# Place executables in the environment at the front of the path
+ENV PATH="/workspace/.venv/bin:$PATH"
+
+# Set PYTHONPATH to include both projects
+ENV PYTHONPATH="/workspace:/workspace/diffusion_policy"
+
+# Enable learnable noise by default
+ENV LEARN_NOISE=1
+
+ENTRYPOINT ["/workspace/bin/entrypoint.sh"]
+CMD ["/bin/bash"]
+

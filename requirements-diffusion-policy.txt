@@ -1,0 +1,53 @@
+# Diffusion Policy Dependencies (Compatible with Python 3.10 and PyTorch 2.x)
+# These dependencies are installed in addition to Cosmos Transfer2.5 dependencies
+# Version numbers are chosen to be compatible with PyTorch 2.7 and Python 3.10
+
+# Core dependencies
+einops>=0.7.0
+hydra-core>=1.3.0
+omegaconf>=2.3.0
+wandb>=0.15.0
+
+# Data processing
+zarr>=2.14.0
+numcodecs>=0.11.0
+h5py>=3.8.0
+imageio>=2.31.0
+imageio-ffmpeg>=0.4.9
+
+# Computer vision
+opencv-python>=4.8.0
+scikit-image>=0.21.0
+scikit-video>=1.1.11
+
+# Utilities
+tqdm>=4.66.0
+dill>=0.3.7
+termcolor>=2.3.0
+psutil>=5.9.0
+click>=8.1.0
+
+# Diffusers (upgraded to support PyTorch 2.x)
+diffusers>=0.24.0
+
+# Visualization and logging
+matplotlib>=3.7.0
+tensorboard>=2.14.0
+tensorboardx>=2.6.0
+
+# Optional: Robot simulation (uncomment if needed)
+# Note: These may require additional system dependencies
+# gym>=0.21.0
+# pymunk>=6.5.0
+# free-mujoco-py>=2.3.0
+
+# Optional: Additional dependencies from original conda environment
+# ray[default,tune]>=2.8.0  # For multi-run experiments
+# robosuite @ https://github.com/cheng-chi/robosuite/archive/277ab9588ad7a4f4b55cf75508b44aa67ec171f0.tar.gz
+# robomimic>=0.3.0
+# pytorchvideo>=0.1.5
+# r3m @ https://github.com/facebookresearch/r3m/archive/b2334e726887fa0206962d7984c69c5fb09cceab.tar.gz
+# dm-control>=1.0.9
+
+numba>=0.60.0
+robomimic

@@ -1,0 +1,22 @@
+{
+  "name": "gradcheck_test",
+  "video_path": "/workspace/assets/robot_example/robot_input.mp4",
+  "prompt_path": "/workspace/assets/robot_example/robot_prompt.txt",
+  "negative_prompt": "",
+
+  "edge": {
+    "path": "/workspace/assets/robot_example/edge"
+  },
+
+  "checkpoint": "nvidia/Cosmos-Transfer2.5-2B",
+  "seed": 42,
+  "resolution": "480",
+  "guidance": 2,
+
+  "disable_reasoning": true,
+  "disable_guardrails": true,
+  "offload_guardrail_models": false,
+  "learn_noise": true,
+  "noise_steps": 1,
+  "noise_lr": 0.005
+}
