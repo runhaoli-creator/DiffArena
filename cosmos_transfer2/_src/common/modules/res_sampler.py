@@ -27,11 +27,25 @@ from typing import Any, Callable, List, Literal, Optional, Tuple, Union
 
 import attrs
 import torch
+import torch.nn.functional as F
 
 from cosmos_transfer2._src.common.functional.multi_step import get_multi_step_fn, is_multi_step_fn_supported
 from cosmos_transfer2._src.common.functional.runge_kutta import get_runge_kutta_fn, is_runge_kutta_fn_supported
 from cosmos_transfer2._src.imaginaire.config import make_freezable
 from cosmos_transfer2._src.imaginaire.utils import log
+
+# === Learnable-noise support (ADD) ===========================================
+import os
+
+# 外部可通过环境变量控制是否学习噪声（也可以稍后从 params/solver_cfg 里传递）
+LEARN_NOISE_ENV = os.getenv("LEARN_NOISE", "0") == "1"
+# 控制是否使用可学习的每步噪声（从 z0 派生，保持梯度流）
+LEARNABLE_STEP_NOISE_ENV = os.getenv("LEARNABLE_STEP_NOISE", "0") == "1"
+
+# 让外层能拿到 z0 的引用（比如在 control2world.infer 里做 backward/opt.step）
+GLOBAL_Z0_ANCHOR = None
+# ============================================================================ 
+
 
 COMMON_SOLVER_OPTIONS = Literal["2ab", "2mid", "1euler"]
 
@@ -112,7 +126,7 @@ class Sampler(torch.nn.Module):
             cfg = SamplerConfig()
         self.cfg = cfg
 
-    @torch.no_grad()
+    #@torch.no_grad()
     def forward(
         self,
         x0_fn: Callable,
@@ -127,6 +141,11 @@ class Sampler(torch.nn.Module):
         S_noise: float = 1,
         solver_option: str = "2ab",
     ) -> torch.Tensor:
+
+         # 允许通过 solver_cfg.learn_noise 或环境变量开启梯度
+        allow_grad = True  # 默认 True 更方便你现在调试；上线可改 False
+        # allow_grad = bool(getattr(self.cfg.solver, "learn_noise", False) or LEARN_NOISE_ENV)
+
         in_dtype = x_sigma_max.dtype
 
         def float64_x0_fn(x_B_StateShape: torch.Tensor, t_B: torch.Tensor) -> torch.Tensor:
@@ -145,12 +164,22 @@ class Sampler(torch.nn.Module):
             rk=solver_option,
             multistep=solver_option,
         )
+        # 如果 allow_grad=True，设置 learn_noise=True
+        # 可以选择是否使用 learnable_step_noise（从 z0 派生每步噪声，保持梯度流）
+        if allow_grad:
+            setattr(solver_cfg, "learn_noise", True)
+            # 默认关闭 learnable_step_noise，使用传统的关闭随机噪声注入方式
+            # 如果需要保持随机噪声注入但又要梯度流，设置 learnable_step_noise=True
+            # 可以通过环境变量 LEARNABLE_STEP_NOISE=1 来启用
+            if not hasattr(solver_cfg, "learnable_step_noise"):
+                learnable_step_noise_env = os.getenv("LEARNABLE_STEP_NOISE", "0") == "1"
+                setattr(solver_cfg, "learnable_step_noise", learnable_step_noise_env)
         timestamps_cfg = SolverTimestampConfig(nfe=num_steps, t_min=sigma_min, t_max=sigma_max, order=rho)
         sampler_cfg = SamplerConfig(solver=solver_cfg, timestamps=timestamps_cfg, sample_clean=True)
 
         return self._forward_impl(float64_x0_fn, x_sigma_max, sampler_cfg).to(in_dtype)
 
-    @torch.no_grad()
+    #@torch.no_grad()
     def _forward_impl(
         self,
         denoiser_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
@@ -170,6 +199,10 @@ class Sampler(torch.nn.Module):
         Returns:
             torch.Tensor: Denoised output tensor.
         """
+        # 与 forward 一致的 allow_grad 开关（可以只从 sampler_cfg.solver.learn_noise 或环境获取）
+        allow_grad = True  # 调试阶段默认开梯度
+        # allow_grad = bool(getattr(sampler_cfg.solver, "learn_noise", False) or LEARN_NOISE_ENV)
+
         sampler_cfg = self.cfg if sampler_cfg is None else sampler_cfg
         solver_order = 1 if sampler_cfg.solver.is_multi else int(sampler_cfg.solver.rk[0])
         num_timestamps = sampler_cfg.timestamps.nfe // solver_order
@@ -178,9 +211,84 @@ class Sampler(torch.nn.Module):
             sampler_cfg.timestamps.t_min, sampler_cfg.timestamps.t_max, num_timestamps, sampler_cfg.timestamps.order
         ).to(noisy_input_B_StateShape.device)
 
+        # === Learnable z0 (ADD) =============================================
+        # 条件：当 allow_grad=True 或 solver.learn_noise=True 时启用可学习噪声
+        if allow_grad or getattr(sampler_cfg.solver, "learn_noise", False) or LEARN_NOISE_ENV:
+            sigma_max_0 = sigmas_L[0]
+            
+            # 检查是否已经存在可学习的noise（从外部传入）
+            import sys
+            current_module = sys.modules[__name__]
+            if hasattr(current_module, 'GLOBAL_Z0_ANCHOR') and current_module.GLOBAL_Z0_ANCHOR is not None:
+                # 使用外部提供的learnable noise
+                z0 = current_module.GLOBAL_Z0_ANCHOR
+                # 确保形状匹配
+                if z0.shape != noisy_input_B_StateShape.shape:
+                    log.warning(f"GLOBAL_Z0_ANCHOR shape {z0.shape} doesn't match input shape {noisy_input_B_StateShape.shape}, resizing...")
+                    # Handle different dimensional cases
+                    if len(z0.shape) == 5:  # (B, C, T, H, W)
+                        z0 = F.interpolate(z0, size=noisy_input_B_StateShape.shape[2:], mode='trilinear', align_corners=False)
+                    elif len(z0.shape) == 4:  # (B, C, H, W)
+                        z0 = F.interpolate(z0, size=noisy_input_B_StateShape.shape[2:], mode='bilinear', align_corners=False)
+                    else:
+                        # Fallback: reshape or pad
+                        if z0.numel() == noisy_input_B_StateShape.numel():
+                            z0 = z0.reshape(noisy_input_B_StateShape.shape)
+                        else:
+                            log.error(f"Cannot reshape z0 from {z0.shape} to {noisy_input_B_StateShape.shape}")
+                            z0 = torch.randn_like(noisy_input_B_StateShape)
+                # 确保requires_grad
+                if not z0.requires_grad:
+                    z0 = z0.requires_grad_(True)
+                    current_module.GLOBAL_Z0_ANCHOR = z0
+            else:
+                # 以传入的 noisy_input 的形状为准，初始化 z0 为标准正态
+                z0 = torch.randn_like(noisy_input_B_StateShape)
+                z0.requires_grad_(True)
+                # 暴露给外层，便于读取梯度 / 用 optimizer 更新
+                current_module.GLOBAL_Z0_ANCHOR = z0
+            
+            input_xT_B_StateShape = sigma_max_0 * z0  # x_T = sigma_max * z0
+            
+            # 如果允许每步噪声注入但仍然保持梯度流，预生成所有步骤的噪声
+            # 关键：使用 z0 的可微分变换来生成每步噪声，而不是独立的随机噪声
+            # 这样梯度可以从每步噪声传递回 z0
+            use_learnable_step_noise = getattr(sampler_cfg.solver, "learnable_step_noise", False)
+            if use_learnable_step_noise:
+                # 预生成所有步骤的噪声，通过 z0 的可微分变换来生成（保持梯度连接）
+                num_steps = len(sigmas_L) - 1
+                step_noise_list = []
+                for step_idx in range(num_steps):
+                    # 方法：使用 z0 的可微分变换来生成每步噪声
+                    # 1. 使用 z0 的缩放和位移（保持可微分）
+                    scale = 1.0 + 0.1 * (step_idx / num_steps)  # 每步略有不同
+                    # 2. 使用 z0 的周期性变换（sin/cos，保持可微分）
+                    phase = step_idx * 0.1  # 每步的相位偏移
+                    step_noise = z0 * scale + torch.sin(z0 * phase + step_idx) * 0.1
+                    # 3. 添加 z0 的旋转/翻转（通过可微分的矩阵变换）
+                    # 使用简单的线性组合确保梯度流
+                    step_noise = step_noise + torch.cos(z0 * phase) * 0.05
+                    step_noise_list.append(step_noise)
+                # 存储到全局变量供 step_fn 使用
+                current_module.GLOBAL_STEP_NOISE_LIST = step_noise_list
+                log.debug(f"Generated {num_steps} learnable step noises from z0 (gradient-preserving)")
+            else:
+                current_module.GLOBAL_STEP_NOISE_LIST = None
+
+            start_state = input_xT_B_StateShape
+        else:
+            # 保持旧行为：使用上游传入的初始噪声张量
+            start_state = noisy_input_B_StateShape
+            import sys
+            current_module = sys.modules[__name__]
+            current_module.GLOBAL_STEP_NOISE_LIST = None
+        # ====================================================================
+
+        # 用上面的 start_state 进入采样
         denoised_output = differential_equation_solver(
             denoiser_fn, sigmas_L, sampler_cfg.solver, callback_fns=callback_fns
-        )(noisy_input_B_StateShape)
+        )(start_state)
+
 
         if sampler_cfg.sample_clean:
             # Override denoised_output with fully denoised version
@@ -260,10 +368,38 @@ def differential_equation_solver(
             # algorithm 2: line 4-6
             if solver_cfg.s_t_min < sigma_cur_0 < solver_cfg.s_t_max:
                 hat_sigma_cur_0 = sigma_cur_0 + eta * sigma_cur_0
-                input_x_B_StateShape = input_x_B_StateShape + (
-                    hat_sigma_cur_0**2 - sigma_cur_0**2
-                ).sqrt() * solver_cfg.s_noise * torch.randn_like(input_x_B_StateShape)
+
+                # 保证 solver_cfg 有 learn_noise 字段
+                if not hasattr(solver_cfg, "learn_noise"):
+                    setattr(solver_cfg, "learn_noise", False)
+
+                # 检查是否使用可学习的每步噪声（从 z0 派生，保持梯度流）
+                use_learnable_step_noise = getattr(solver_cfg, "learnable_step_noise", False)
+                
+                # 如果启用 learnable_step_noise，使用从 z0 派生的噪声（保持梯度流）
+                if use_learnable_step_noise and solver_cfg.s_noise > 0.0:
+                    import sys
+                    current_module = sys.modules[__name__]
+                    if hasattr(current_module, "GLOBAL_STEP_NOISE_LIST") and current_module.GLOBAL_STEP_NOISE_LIST is not None:
+                        # 使用预生成的从 z0 派生的噪声
+                        step_noise = current_module.GLOBAL_STEP_NOISE_LIST[i_th]
+                        noise_scale = (hat_sigma_cur_0**2 - sigma_cur_0**2).sqrt() * solver_cfg.s_noise
+                        input_x_B_StateShape = input_x_B_StateShape + noise_scale * step_noise
+                    else:
+                        # 回退到关闭随机噪声注入
+                        pass  # 不添加噪声
+                # 如果 learn_noise=True 但 learnable_step_noise=False，关闭随机噪声注入
+                elif solver_cfg.learn_noise and not use_learnable_step_noise:
+                # 学习噪声阶段：关闭每步新随机注入，避免稀释梯度到 z0 的路径
+                    pass  # 不添加随机噪声
+                # 正常情况：使用随机噪声注入
+                elif not solver_cfg.learn_noise and solver_cfg.s_noise > 0.0:
+                    input_x_B_StateShape = input_x_B_StateShape + (
+                        hat_sigma_cur_0**2 - sigma_cur_0**2
+                    ).sqrt() * solver_cfg.s_noise * torch.randn_like(input_x_B_StateShape)
+
                 sigma_cur_0 = hat_sigma_cur_0
+
 
             if solver_cfg.is_multi:
                 x0_pred_B_StateShape = x0_fn(input_x_B_StateShape, sigma_cur_0 * ones_B)

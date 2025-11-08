@@ -62,10 +62,15 @@ else:
 if is_flash_attn_2_available():
     from transformers.modeling_flash_attention_utils import _flash_attention_forward
 else:
-    print("flash_attn_2 not available")
+    print("flash_attn_2 not available, using fallback attention")
     flash_attn_varlen_func = None
+    _flash_attention_forward = None
 
-assert is_flash_attn_2_available(), "flash_attn_2 not available. run pip install flash_attn"
+# Temporarily disable the assertion to allow running without flash_attn
+# assert is_flash_attn_2_available(), "flash_attn_2 not available. run pip install flash_attn"
+if not is_flash_attn_2_available():
+    import warnings
+    warnings.warn("flash_attn_2 not available, using fallback attention mechanism. Performance may be degraded.")
 
 logger = logging.get_logger(__name__)
 

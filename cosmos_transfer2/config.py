@@ -397,6 +397,8 @@ CONTROL_KEYS = ["edge", "vis", "depth", "seg"]
 
 
 class InferenceArguments(CommonInferenceArguments):
+    model_config = pydantic.ConfigDict(extra="allow")  # Allow extra fields for learnable noise params
+    
     # pyrefly: ignore  # bad-assignment
     video_path: ResolvedFilePath = None
     image_context_path: ResolvedFilePath | None = None
@@ -415,6 +417,11 @@ class InferenceArguments(CommonInferenceArguments):
     depth: ControlConfig | None = None
     vis: BlurConfig | None = None
     seg: SegConfig | None = None
+
+    # Learnable noise parameters (optional)
+    learn_noise: bool = False
+    noise_steps: int = 1
+    noise_lr: float = 5e-3
 
     # Override defaults
     guidance: Guidance = 3

@@ -205,9 +205,10 @@ class ControlVideo2WorldInference:
             ).contiguous()
 
         # Handle negative prompts for classifier-free guidance
-        if negative_prompt is not None:
-            assert self.neg_t5_embeddings is not None, "Negative prompt embedding is not computed."
-            data_batch["neg_t5_text_embeddings"] = self.neg_t5_embeddings
+        if negative_prompt is not None and negative_prompt:
+            # Check if neg_t5_embeddings exists (it was computed if negative_prompt was provided)
+            if hasattr(self, 'neg_t5_embeddings') and self.neg_t5_embeddings is not None:
+                data_batch["neg_t5_text_embeddings"] = self.neg_t5_embeddings
 
         return data_batch
 
@@ -257,8 +258,7 @@ class ControlVideo2WorldInference:
                 raise ValueError(f"Invalid padding mode: {padding_mode}")
         return input_frames
 
-    @torch.no_grad()
-    def generate_img2world(
+    def _generate_img2world_impl(
         self,
         prompt: str | torch.Tensor | list[str] | dict[str, str],
         video_path: str,
@@ -529,3 +529,58 @@ class ControlVideo2WorldInference:
                     )
         log.info(f"Average time per chunk: {sum(time_per_chunk) / len(time_per_chunk)}")
         return full_video, control_video_dict, fps, original_hw
+
+    @torch.no_grad()
+    def generate_img2world(
+        self,
+        prompt: str | torch.Tensor | list[str] | dict[str, str],
+        video_path: str,
+        guidance: int = 7,
+        seed: int = 1,
+        resolution: str = "720",
+        num_conditional_frames: int = 1,
+        num_video_frames_per_chunk: int = 93,
+        num_steps: int = 35,
+        control_weight: str = "1.0",
+        sigma_max: float | None = None,
+        hint_key: list[str] = ["edge"],
+        preset_edge_threshold: str = "medium",
+        preset_blur_strength: str = "medium",
+        seg_control_prompt: str | None = None,
+        input_control_video_paths: dict[str, str] | None = None,
+        show_control_condition: bool = False,
+        show_input: bool = False,
+        image_context_path: Optional[str] = None,
+        keep_input_resolution: bool = True,
+        negative_prompt: str | None = None,
+        max_frames: int | None = None,
+        context_frame_idx: int | None = None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor], int, tuple[int, int]]:
+        """
+        Wrapper method that calls _generate_img2world_impl with no_grad by default.
+        For learnable noise, use _generate_img2world_impl directly with torch.set_grad_enabled(True).
+        """
+        return self._generate_img2world_impl(
+            prompt=prompt,
+            video_path=video_path,
+            guidance=guidance,
+            seed=seed,
+            resolution=resolution,
+            num_conditional_frames=num_conditional_frames,
+            num_video_frames_per_chunk=num_video_frames_per_chunk,
+            num_steps=num_steps,
+            control_weight=control_weight,
+            sigma_max=sigma_max,
+            hint_key=hint_key,
+            preset_edge_threshold=preset_edge_threshold,
+            preset_blur_strength=preset_blur_strength,
+            seg_control_prompt=seg_control_prompt,
+            input_control_video_paths=input_control_video_paths,
+            show_control_condition=show_control_condition,
+            show_input=show_input,
+            image_context_path=image_context_path,
+            keep_input_resolution=keep_input_resolution,
+            negative_prompt=negative_prompt,
+            max_frames=max_frames,
+            context_frame_idx=context_frame_idx,
+        )

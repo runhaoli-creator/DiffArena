@@ -204,3 +204,45 @@ cython_debug/
 !assets/**/*.png
 !assets/**/*.jpg
 !assets/**/*.mp4
+
+# ============================================================
+# === Cosmos-Transfer 2.5 / DiffArena project specific ignore rules ===
+# ============================================================
+
+outputs/
+adversarial_output_*/
+test_output/
+runs/
+wandb/
+logs/
+*.log
+*.pt
+*.pth
+*.ckpt
+*.npz
+*.npy
+*.pkl
+*.tar
+*.zip
+*.gz
+*.bz2
+*.json.bak
+*.tmp
+*.bak
+*.swp
+*.DS_Store
+*.mp4
+*.avi
+*.gif
+*.png
+*.jpg
+*.jpeg
+.env
+docker-compose.yml
+docker-compose.unified.yml
+docker-compose.env
+*.egg-info/
+venv/
+.env/
+__pycache__/
+.cache/

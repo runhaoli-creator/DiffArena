@@ -192,31 +192,177 @@ class Control2WorldInference:
         else:
             start_time = None
 
-        # Run model inference
-        output_video, control_video_dict, fps, _ = self.inference_pipeline.generate_img2world(
-            # pyrefly: ignore  # bad-argument-type
-            video_path=path_to_str(sample.video_path),
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            image_context_path=path_to_str(sample.image_context_path),
-            guidance=sample.guidance,
-            seed=sample.seed,
-            resolution=sample.resolution,
-            control_weight=control_weight,
-            sigma_max=sigma_max,
-            hint_key=sample.hint_keys,
-            # pyrefly: ignore  # bad-argument-type
-            input_control_video_paths=input_control_video_paths,
-            show_control_condition=sample.show_control_condition,
-            seg_control_prompt=sample.seg_control_prompt,
-            show_input=sample.show_input,
-            keep_input_resolution=not sample.not_keep_input_resolution,
-            preset_blur_strength=sample.preset_blur_strength,
-            preset_edge_threshold=sample.preset_edge_threshold,
-            num_conditional_frames=sample.num_conditional_frames,
-            num_video_frames_per_chunk=sample.num_video_frames_per_chunk,
-            num_steps=sample.num_steps,
-        )
+
+        # ====== Learnable-noise: do a grad pass & push gradients to z0 ======
+        # 你可以把这些超参放进 sample（InferenceArguments）或用默认值
+        learn_noise = bool(getattr(sample, "learn_noise", True))  # 默认启用用于测试
+        noise_steps = int(getattr(sample, "noise_steps", 1))
+        noise_lr    = float(getattr(sample, "noise_lr", 5e-3))
+
+        if is_rank0():
+            log.info(f"Learnable noise config: learn_noise={learn_noise}, noise_steps={noise_steps}, noise_lr={noise_lr}")
+
+        if learn_noise and noise_steps > 0 and is_rank0():
+            log.info("=" * 50)
+            log.info("Starting learnable noise optimization...")
+            log.info("=" * 50)
+            import copy
+            import torch.nn.functional as F
+
+            # 注意：__init__ 里有 torch.enable_grad(False)，
+            # 这里需要临时打开梯度，确保这趟前向拥有计算图
+            # 使用 _generate_img2world_impl 而不是 generate_img2world，因为后者有 @torch.no_grad() 装饰器
+            with torch.set_grad_enabled(True):
+                # 第一次生成：带梯度的前向传播
+                output_video, control_video_dict, fps, _ = self.inference_pipeline._generate_img2world_impl(
+                    video_path=path_to_str(sample.video_path),
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    image_context_path=path_to_str(sample.image_context_path),
+                    guidance=sample.guidance,
+                    seed=sample.seed,
+                    resolution=sample.resolution,
+                    control_weight=control_weight,
+                    sigma_max=sigma_max,
+                    hint_key=sample.hint_keys,
+                    input_control_video_paths=input_control_video_paths,
+                    show_control_condition=sample.show_control_condition,
+                    seg_control_prompt=sample.seg_control_prompt,
+                    show_input=sample.show_input,
+                    keep_input_resolution=not sample.not_keep_input_resolution,
+                    preset_blur_strength=sample.preset_blur_strength,
+                    preset_edge_threshold=sample.preset_edge_threshold,
+                    num_conditional_frames=sample.num_conditional_frames,
+                    num_video_frames_per_chunk=sample.num_video_frames_per_chunk,
+                    num_steps=sample.num_steps,
+                )
+
+            # baseline 目标：固定 seed / 禁用 learn_noise，再跑一趟（不回传）
+            with torch.no_grad():
+                p_base = copy.deepcopy(sample)
+                # 改一个不同的 seed（或者固定一个常数种子）
+                setattr(p_base, "seed", sample.seed + 12345)
+                # 如果你在 res_sampler 里读取的是 solver_cfg.learn_noise，可在 pipeline 里转发；
+                # 这里直接利用我们在 res_sampler 中的环境变量或默认逻辑也可以。
+                baseline_out, _, _, _ = self.inference_pipeline.generate_img2world(
+                    video_path=path_to_str(p_base.video_path),
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    image_context_path=path_to_str(p_base.image_context_path),
+                    guidance=p_base.guidance,
+                    seed=p_base.seed,
+                    resolution=p_base.resolution,
+                    control_weight=control_weight,
+                    sigma_max=sigma_max,
+                    hint_key=p_base.hint_keys,
+                    input_control_video_paths=input_control_video_paths,
+                    show_control_condition=p_base.show_control_condition,
+                    seg_control_prompt=p_base.seg_control_prompt,
+                    show_input=p_base.show_input,
+                    keep_input_resolution=not p_base.not_keep_input_resolution,
+                    preset_blur_strength=p_base.preset_blur_strength,
+                    preset_edge_threshold=p_base.preset_edge_threshold,
+                    num_conditional_frames=p_base.num_conditional_frames,
+                    num_video_frames_per_chunk=p_base.num_video_frames_per_chunk,
+                    num_steps=p_base.num_steps,
+                )
+
+            # 取出在 res_sampler 暴露的全局 z0
+            try:
+                from cosmos_transfer2._src.common.modules import res_sampler as _rs
+            except Exception:
+                from cosmos_transfer2._src.predict2.samplers import res_sampler as _rs
+
+            assert hasattr(_rs, "GLOBAL_Z0_ANCHOR") and _rs.GLOBAL_Z0_ANCHOR is not None, \
+                "GLOBAL_Z0_ANCHOR 未设置；请确认在 res_sampler 初始化处将 z0 赋值到该变量。"
+
+            # 计算 loss 并反传至 res_sampler 的 z0
+            # 注意：目标是最大化 loss（让 loss 越来越大），所以使用 -loss 进行梯度上升
+            loss = F.mse_loss(output_video, baseline_out)
+            log.info(f"Initial loss: {loss.item():.6f}")
+            
+            # 梯度上升：对 -loss 做 backward，这样优化器会最大化 loss
+            (-loss).backward()
+
+            # 检查梯度是否成功反传（在优化之前）
+            log.info("=" * 50)
+            if _rs.GLOBAL_Z0_ANCHOR.grad is not None:
+                grad_mean = _rs.GLOBAL_Z0_ANCHOR.grad.abs().mean().item()
+                grad_max = _rs.GLOBAL_Z0_ANCHOR.grad.abs().max().item()
+                log.success(f"✅ Gradient successfully backpropagated to z0!")
+                log.info(f"   z0 grad mean: {grad_mean:.6e}")
+                log.info(f"   z0 grad max:  {grad_max:.6e}")
+            else:
+                log.error("❌ No gradient found on z0! Check if:")
+                log.error("   1. res_sampler._forward_impl has allow_grad=True")
+                log.error("   2. z0.requires_grad_(True) was called")
+                log.error("   3. The forward pass was inside torch.set_grad_enabled(True)")
+                log.error("   4. solver_cfg.solver.learn_noise was set to True")
+            log.info("=" * 50)
+
+            # 使用梯度上升优化 z0（最大化 loss）
+            # 注意：由于我们对 -loss 做了 backward，所以正常的学习率会最大化 loss
+            opt = torch.optim.Adam([_rs.GLOBAL_Z0_ANCHOR], lr=noise_lr)
+            for step in range(noise_steps):
+                if _rs.GLOBAL_Z0_ANCHOR.grad is not None:
+                    opt.step()
+                    opt.zero_grad()
+                    log.info(f"Noise optimization step {step+1}/{noise_steps} completed")
+                else:
+                    log.warning(f"No gradient available at step {step+1}, skipping optimization")
+                    break
+
+            # 用更新后的噪声再生成一次最终结果（这次可以 no_grad）
+            with torch.no_grad():
+                output_video, control_video_dict, fps, _ = self.inference_pipeline.generate_img2world(
+                    video_path=path_to_str(sample.video_path),
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    image_context_path=path_to_str(sample.image_context_path),
+                    guidance=sample.guidance,
+                    seed=sample.seed,
+                    resolution=sample.resolution,
+                    control_weight=control_weight,
+                    sigma_max=sigma_max,
+                    hint_key=sample.hint_keys,
+                    input_control_video_paths=input_control_video_paths,
+                    show_control_condition=sample.show_control_condition,
+                    seg_control_prompt=sample.seg_control_prompt,
+                    show_input=sample.show_input,
+                    keep_input_resolution=not sample.not_keep_input_resolution,
+                    preset_blur_strength=sample.preset_blur_strength,
+                    preset_edge_threshold=sample.preset_edge_threshold,
+                    num_conditional_frames=sample.num_conditional_frames,
+                    num_video_frames_per_chunk=sample.num_video_frames_per_chunk,
+                    num_steps=sample.num_steps,
+                )
+        else:
+            # 正常生成流程（不使用 learnable noise）
+            with torch.no_grad():
+                output_video, control_video_dict, fps, _ = self.inference_pipeline.generate_img2world(
+                    video_path=path_to_str(sample.video_path),
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    image_context_path=path_to_str(sample.image_context_path),
+                    guidance=sample.guidance,
+                    seed=sample.seed,
+                    resolution=sample.resolution,
+                    control_weight=control_weight,
+                    sigma_max=sigma_max,
+                    hint_key=sample.hint_keys,
+                    input_control_video_paths=input_control_video_paths,
+                    show_control_condition=sample.show_control_condition,
+                    seg_control_prompt=sample.seg_control_prompt,
+                    show_input=sample.show_input,
+                    keep_input_resolution=not sample.not_keep_input_resolution,
+                    preset_blur_strength=sample.preset_blur_strength,
+                    preset_edge_threshold=sample.preset_edge_threshold,
+                    num_conditional_frames=sample.num_conditional_frames,
+                    num_video_frames_per_chunk=sample.num_video_frames_per_chunk,
+                    num_steps=sample.num_steps,
+                )
+        # ====== end learnable-noise block ======
+
 
         if start_time is not None:
             torch.cuda.synchronize()
