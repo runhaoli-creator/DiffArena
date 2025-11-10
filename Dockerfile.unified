@@ -85,15 +85,24 @@ COPY requirements-diffusion-policy.txt* ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=requirements-diffusion-policy.txt,target=requirements-diffusion-policy.txt \
     if [ -f requirements-diffusion-policy.txt ]; then \
-        /workspace/.venv/bin/pip install -r requirements-diffusion-policy.txt || true; \
+        uv pip install -r requirements-diffusion-policy.txt || true; \
     fi
 
 # Install Diffusion Policy package in development mode (if directory exists)
 # This allows us to import it as a module
 RUN --mount=type=bind,source=diffusion_policy,target=diffusion_policy \
     if [ -d diffusion_policy ]; then \
-        /workspace/.venv/bin/pip install -e ./diffusion_policy || true; \
+        uv pip install -e ./diffusion_policy || true; \
     fi
+
+# Install additional runtime dependencies required by Push-T integration
+RUN uv pip install \
+        gym==0.26.2 \
+        pygame==2.1.3 \
+        pymunk==6.5.0 \
+        numba==0.60.0 \
+        dill==0.3.8 && \
+    uv pip uninstall flash-attn || true
 
 # Place executables in the environment at the front of the path
 ENV PATH="/workspace/.venv/bin:$PATH"
